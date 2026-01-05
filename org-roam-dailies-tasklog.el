@@ -126,6 +126,33 @@ Returns formatted time string like \"0:35\" or nil if no clock data."
       (when (> total-minutes 0)
         (format "%d:%02d" (/ total-minutes 60) (% total-minutes 60))))))
 
+(defun org-roam-dailies-tasklog--get-clock-range (content)
+  "Extract first start time and last end time from CONTENT's LOGBOOK.
+Returns (START-TIME . END-TIME) or nil if no clock data."
+  (when (string-match ":LOGBOOK:" content)
+    (let (first-start last-end)
+      (with-temp-buffer
+        (insert content)
+        (goto-char (point-min))
+        (while (re-search-forward "CLOCK: \\[\\([^]]+\\)\\]--\\[\\([^]]+\\)\\]" nil t)
+          (unless first-start
+            (setq first-start (match-string 1)))
+          (setq last-end (match-string 2))))
+      (when (and first-start last-end)
+        (cons first-start last-end)))))
+
+(defun org-roam-dailies-tasklog--format-time (timestamp-str)
+  "Extract time and format as HH:MM AM/PM from org timestamp string."
+  (when (string-match "\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\) [A-Za-z]+ \\([0-9]\\{2\\}\\):\\([0-9]\\{2\\}\\)" timestamp-str)
+    (let* ((hour (string-to-number (match-string 4 timestamp-str)))
+           (minute (match-string 5 timestamp-str))
+           (am-pm (if (< hour 12) "AM" "PM"))
+           (display-hour (cond
+                          ((= hour 0) 12)
+                          ((> hour 12) (- hour 12))
+                          (t hour))))
+      (format "%02d:%s %s" display-hour minute am-pm))))
+
 (defun org-roam-dailies-tasklog--format-log-entry (task-info event-type duration)
   "Format TASK-INFO as a log entry for EVENT-TYPE with optional DURATION.
 TASK-INFO is an alist containing task information.
