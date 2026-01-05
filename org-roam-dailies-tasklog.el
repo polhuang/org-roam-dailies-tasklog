@@ -34,8 +34,9 @@
   :group 'org-roam
   :prefix "org-roam-dailies-tasklog-")
 
-(defcustom org-roam-dailies-tasklog-log-clock-in t
-  "Whether to log clock-in events."
+(defcustom org-roam-dailies-tasklog-log-clock-in nil
+  "Whether to log clock-in events.
+Disabled by default since clock-out shows cumulative time."
   :type 'boolean
   :group 'org-roam-dailies-tasklog)
 
@@ -110,30 +111,49 @@ Returns heading text, TODO state, and subtree content as an alist."
             (cons 'todo-state todo-state)
             (cons 'content content)))))
 
+(defun org-roam-dailies-tasklog--calculate-clock-sum (content)
+  "Calculate total clocked time from CONTENT's LOGBOOK.
+Returns formatted time string like \"0:35\" or nil if no clock data."
+  (when (string-match ":LOGBOOK:" content)
+    (let ((total-minutes 0))
+      (with-temp-buffer
+        (insert content)
+        (goto-char (point-min))
+        (while (re-search-forward "=>[ \t]+\\([0-9]+\\):\\([0-9]+\\)" nil t)
+          (let ((hours (string-to-number (match-string 1)))
+                (minutes (string-to-number (match-string 2))))
+            (setq total-minutes (+ total-minutes (* hours 60) minutes)))))
+      (when (> total-minutes 0)
+        (format "%d:%02d" (/ total-minutes 60) (% total-minutes 60))))))
+
 (defun org-roam-dailies-tasklog--format-log-entry (task-info event-type duration)
   "Format TASK-INFO as a log entry for EVENT-TYPE with optional DURATION.
 TASK-INFO is an alist containing task information.
 EVENT-TYPE is a string describing the event (e.g., \"CLOCKED IN\", \"DONE\").
 DURATION is an optional string describing time spent (e.g., \"0:30\")."
-  (let* ((time-str (format-time-string org-roam-dailies-tasklog-time-format))
-         (heading (alist-get 'heading task-info))
-         (state (or event-type (alist-get 'todo-state task-info)))
+  (let* ((heading (alist-get 'heading task-info))
+         (state (or (alist-get 'todo-state task-info) "IN PROGRESS"))
          (content (alist-get 'content task-info))
-         ;; Map event type to display label
-         (event-label (cond
-                       ((string= state "CLOCKED IN") "Clocked In")
-                       ((string= state "CLOCKED OUT") "Clocked Out")
-                       ((string= state "DONE") "Closed")
-                       (t state))))
+         (clock-sum (org-roam-dailies-tasklog--calculate-clock-sum content))
+         ;; Map event type to display format
+         (is-clock-event (or (string= event-type "CLOCKED IN")
+                            (string= event-type "CLOCKED OUT")))
+         (is-completion (string= event-type "DONE")))
     (concat
-     ;; New heading: * STATE HEADING           EVENT-LABEL [TIME]
-     (format "* %s %s%s%s [%s]%s\n"
-             state
-             heading
-             (make-string (max 1 (- 40 (length heading))) ?\s)  ; padding
-             event-label
-             time-str
-             (if duration (format " (%s)" duration) ""))
+     ;; New heading format
+     (if is-clock-event
+         ;; For clock events: * STATE HEADING         clock_sum: [TIME]
+         (format "* %s %s%sclock_sum: [%s]\n"
+                 state
+                 heading
+                 (make-string (max 1 (- 40 (length heading))) ?\s)
+                 (or clock-sum "0:00"))
+       ;; For completion: * STATE HEADING           Closed [TIME]
+       (format "* %s %s%sClosed [%s]\n"
+               state
+               heading
+               (make-string (max 1 (- 40 (length heading))) ?\s)
+               (format-time-string org-roam-dailies-tasklog-time-format)))
      ;; Everything else from the original task unchanged
      content)))
 
