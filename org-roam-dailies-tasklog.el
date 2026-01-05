@@ -142,7 +142,7 @@ Returns (START-TIME . END-TIME) or nil if no clock data."
         (cons first-start last-end)))))
 
 (defun org-roam-dailies-tasklog--format-time (timestamp-str)
-  "Extract time and format as HH:MM AM/PM from org timestamp string."
+  "Extract time and format as H:MM AM/PM from org timestamp string."
   (when (string-match "\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\) [A-Za-z]+ \\([0-9]\\{2\\}\\):\\([0-9]\\{2\\}\\)" timestamp-str)
     (let* ((hour (string-to-number (match-string 4 timestamp-str)))
            (minute (match-string 5 timestamp-str))
@@ -151,7 +151,7 @@ Returns (START-TIME . END-TIME) or nil if no clock data."
                           ((= hour 0) 12)
                           ((> hour 12) (- hour 12))
                           (t hour))))
-      (format "%02d:%s %s" display-hour minute am-pm))))
+      (format "%d:%s %s" display-hour minute am-pm))))
 
 (defun org-roam-dailies-tasklog--format-log-entry (task-info event-type duration)
   "Format TASK-INFO as a log entry for EVENT-TYPE with optional DURATION.
@@ -162,6 +162,7 @@ DURATION is an optional string describing time spent (e.g., \"0:30\")."
          (state (or (alist-get 'todo-state task-info) "IN PROGRESS"))
          (content (alist-get 'content task-info))
          (clock-sum (org-roam-dailies-tasklog--calculate-clock-sum content))
+         (clock-range (org-roam-dailies-tasklog--get-clock-range content))
          ;; Map event type to display format
          (is-clock-event (or (string= event-type "CLOCKED IN")
                             (string= event-type "CLOCKED OUT")))
@@ -169,12 +170,18 @@ DURATION is an optional string describing time spent (e.g., \"0:30\")."
     (concat
      ;; New heading format
      (if is-clock-event
-         ;; For clock events: * STATE HEADING         clock_sum: [TIME]
-         (format "* %s %s%sclock_sum: [%s]\n"
-                 state
-                 heading
-                 (make-string (max 1 (- 40 (length heading))) ?\s)
-                 (or clock-sum "0:00"))
+         ;; For clock events: * STATE HEADING         START→END [DURATION]
+         (let ((start-time (when clock-range
+                            (org-roam-dailies-tasklog--format-time (car clock-range))))
+               (end-time (when clock-range
+                          (org-roam-dailies-tasklog--format-time (cdr clock-range)))))
+           (format "* %s %s%s%s→%s [%s]\n"
+                   state
+                   heading
+                   (make-string (max 1 (- 40 (length heading))) ?\s)
+                   (or start-time "??:??")
+                   (or end-time "??:??")
+                   (or clock-sum "0:00")))
        ;; For completion: * STATE HEADING           Closed [TIME]
        (format "* %s %s%sClosed [%s]\n"
                state
