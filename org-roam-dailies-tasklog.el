@@ -161,5 +161,51 @@ properties, body content, and logbook."
             (cons 'logbook logbook)
             (cons 'file-path file-path)))))
 
+(defun org-roam-dailies-tasklog--format-log-entry (task-info event-type duration)
+  "Format TASK-INFO as a log entry for EVENT-TYPE with optional DURATION.
+TASK-INFO is an alist containing task information.
+EVENT-TYPE is a string describing the event (e.g., \"CLOCKED IN\", \"DONE\").
+DURATION is an optional string describing time spent (e.g., \"0:30\")."
+  (let* ((time-str (format-time-string org-roam-dailies-tasklog-time-format))
+         (heading (alist-get 'heading task-info))
+         (state (or event-type (alist-get 'todo-state task-info)))
+         (tags (alist-get 'tags task-info))
+         (properties (alist-get 'properties task-info))
+         (body (alist-get 'body task-info))
+         (logbook (alist-get 'logbook task-info))
+         (file-path (alist-get 'file-path task-info)))
+    (concat
+     ;; Heading line
+     (format "* %s: %s %s%s\n"
+             time-str
+             state
+             heading
+             (if duration (format " (%s)" duration) ""))
+     ;; Properties drawer
+     ":PROPERTIES:\n"
+     ;; Add original file path
+     (when file-path
+       (format ":ORIGINAL_FILE: %s\n" file-path))
+     ;; Add tags as a property if present
+     (when tags
+       (format ":TAGS: %s\n" (mapconcat #'identity tags " ")))
+     ;; Add other properties, filtering out standard ones that are redundant
+     (mapconcat
+      (lambda (prop)
+        (let ((key (car prop))
+              (val (cdr prop)))
+          ;; Filter out properties that are redundant or internal
+          (unless (member key '("CATEGORY" "BLOCKED" "FILE" "ITEM" "TODO"))
+            (format ":%s: %s" key val))))
+      properties
+      "\n")
+     "\n:END:\n"
+     ;; Logbook drawer if present
+     (when (and logbook (not (string-empty-p logbook)))
+       (concat ":LOGBOOK:\n" logbook "\n:END:\n"))
+     ;; Body content if present
+     (when (and body (not (string-empty-p body)))
+       (concat body "\n")))))
+
 (provide 'org-roam-dailies-tasklog)
 ;;; org-roam-dailies-tasklog.el ends here
