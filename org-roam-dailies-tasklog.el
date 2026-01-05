@@ -207,5 +207,28 @@ DURATION is an optional string describing time spent (e.g., \"0:30\")."
      (when (and body (not (string-empty-p body)))
        (concat body "\n")))))
 
+(defun org-roam-dailies-tasklog--append-to-daily (formatted-entry)
+  "Append FORMATTED-ENTRY to today's org-roam daily note.
+Opens the daily note file, appends the entry to the end, and saves.
+Manages buffer state to avoid disrupting the user's window layout."
+  (let* ((daily-file (org-roam-dailies-tasklog--get-daily-note-path))
+         (buffer-was-open (find-buffer-visiting daily-file)))
+    (org-roam-dailies-tasklog--debug "Appending entry to: %s" daily-file)
+    (with-current-buffer (find-file-noselect daily-file)
+      (save-excursion
+        (goto-char (point-max))
+        ;; Ensure proper spacing
+        (unless (bolp)
+          (insert "\n"))
+        ;; Add a blank line before the entry if the file isn't empty
+        (when (> (point-max) 1)
+          (insert "\n"))
+        (insert formatted-entry))
+      (save-buffer)
+      (org-roam-dailies-tasklog--debug "Entry appended successfully")
+      ;; Close buffer if it wasn't already open
+      (unless buffer-was-open
+        (kill-buffer)))))
+
 (provide 'org-roam-dailies-tasklog)
 ;;; org-roam-dailies-tasklog.el ends here
