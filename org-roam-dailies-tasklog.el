@@ -83,5 +83,26 @@ FORMAT-STRING and ARGS are passed to `message'."
   (when org-roam-dailies-tasklog-debug
     (apply #'message (concat "org-roam-dailies-tasklog: " format-string) args)))
 
+(defun org-roam-dailies-tasklog--get-daily-note-path ()
+  "Get the file path for today's org-roam daily note.
+Creates the directory and file if they don't exist."
+  (let* ((time (current-time))
+         (file-name (format-time-string "%Y-%m-%d.org" time))
+         (daily-dir (expand-file-name
+                     (or org-roam-dailies-directory "daily")
+                     org-roam-directory))
+         (file-path (expand-file-name file-name daily-dir)))
+    ;; Create directory if it doesn't exist
+    (unless (file-exists-p daily-dir)
+      (make-directory daily-dir t)
+      (org-roam-dailies-tasklog--debug "Created dailies directory: %s" daily-dir))
+    ;; Create file with basic structure if it doesn't exist
+    (unless (file-exists-p file-path)
+      (with-temp-file file-path
+        (insert (format "#+title: %s\n\n"
+                       (format-time-string "%Y-%m-%d" time))))
+      (org-roam-dailies-tasklog--debug "Created daily note: %s" file-path))
+    file-path))
+
 (provide 'org-roam-dailies-tasklog)
 ;;; org-roam-dailies-tasklog.el ends here
