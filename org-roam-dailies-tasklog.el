@@ -209,25 +209,32 @@ DURATION is an optional string describing time spent (e.g., \"0:30\")."
      ;; Everything else from the original task unchanged
      content)))
 
-(defun org-roam-dailies-tasklog--append-to-daily (formatted-entry)
-  "Append FORMATTED-ENTRY to today's org-roam daily note.
-Opens the daily note file, appends the entry to the end, and saves.
-Manages buffer state to avoid disrupting the user's window layout."
+(defun org-roam-dailies-tasklog--upsert-to-daily (formatted-entry heading)
+  "Update existing entry for HEADING or append FORMATTED-ENTRY if not found.
+Opens the daily note file, searches for existing entry with HEADING,
+and either replaces it or appends a new entry. Manages buffer state
+to avoid disrupting the user's window layout."
   (let* ((daily-file (org-roam-dailies-tasklog--get-daily-note-path))
-         (buffer-was-open (find-buffer-visiting daily-file)))
-    (org-roam-dailies-tasklog--debug "Appending entry to: %s" daily-file)
+         (buffer-was-open (find-buffer-visiting daily-file))
+         (entry-pos (org-roam-dailies-tasklog--find-entry-by-heading heading daily-file)))
     (with-current-buffer (find-file-noselect daily-file)
       (save-excursion
-        (goto-char (point-max))
-        ;; Ensure proper spacing
-        (unless (bolp)
-          (insert "\n"))
-        ;; Add a blank line before the entry if the file isn't empty
-        (when (> (point-max) 1)
-          (insert "\n"))
-        (insert formatted-entry))
+        (if entry-pos
+            ;; Replace existing entry
+            (progn
+              (org-roam-dailies-tasklog--debug "Updating existing entry for: %s" heading)
+              (goto-char (car entry-pos))
+              (delete-region (car entry-pos) (cdr entry-pos))
+              (insert formatted-entry))
+          ;; Append new entry
+          (org-roam-dailies-tasklog--debug "Creating new entry for: %s" heading)
+          (goto-char (point-max))
+          (unless (bolp)
+            (insert "\n"))
+          (when (> (point-max) 1)
+            (insert "\n"))
+          (insert formatted-entry)))
       (save-buffer)
-      (org-roam-dailies-tasklog--debug "Entry appended successfully")
       ;; Close buffer if it wasn't already open
       (unless buffer-was-open
         (kill-buffer)))))
@@ -249,12 +256,13 @@ Returns t on success, nil on failure."
 
         ;; Main logic
         (org-roam-dailies-tasklog--debug "Logging event: %s" event-type)
-        (let ((task-info (org-roam-dailies-tasklog--get-subtree-content)))
+        (let* ((task-info (org-roam-dailies-tasklog--get-subtree-content))
+               (heading (alist-get 'heading task-info)))
           (when task-info
             (let ((formatted-entry
                    (org-roam-dailies-tasklog--format-log-entry
                     task-info event-type duration)))
-              (org-roam-dailies-tasklog--append-to-daily formatted-entry)
+              (org-roam-dailies-tasklog--upsert-to-daily formatted-entry heading)
               t)))
         t)
     (error
