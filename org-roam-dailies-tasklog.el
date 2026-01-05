@@ -34,16 +34,6 @@
   :group 'org-roam
   :prefix "org-roam-dailies-tasklog-")
 
-(defcustom org-roam-dailies-tasklog-include-body t
-  "Whether to include task body content in log entries."
-  :type 'boolean
-  :group 'org-roam-dailies-tasklog)
-
-(defcustom org-roam-dailies-tasklog-include-logbook t
-  "Whether to include LOGBOOK drawer in log entries."
-  :type 'boolean
-  :group 'org-roam-dailies-tasklog)
-
 (defcustom org-roam-dailies-tasklog-log-clock-in t
   "Whether to log clock-in events."
   :type 'boolean
@@ -126,43 +116,16 @@ DURATION is an optional string describing time spent (e.g., \"0:30\")."
   (let* ((time-str (format-time-string org-roam-dailies-tasklog-time-format))
          (heading (alist-get 'heading task-info))
          (state (or event-type (alist-get 'todo-state task-info)))
-         (tags (alist-get 'tags task-info))
-         (properties (alist-get 'properties task-info))
-         (body (alist-get 'body task-info))
-         (logbook (alist-get 'logbook task-info))
-         (file-path (alist-get 'file-path task-info)))
+         (content (alist-get 'content task-info)))
     (concat
-     ;; Heading line
+     ;; New heading with timestamp, event type, and task title
      (format "* %s: %s %s%s\n"
              time-str
              state
              heading
              (if duration (format " (%s)" duration) ""))
-     ;; Properties drawer
-     ":PROPERTIES:\n"
-     ;; Add original file path
-     (when file-path
-       (format ":ORIGINAL_FILE: %s\n" file-path))
-     ;; Add tags as a property if present
-     (when tags
-       (format ":TAGS: %s\n" (mapconcat #'identity tags " ")))
-     ;; Add other properties, filtering out standard ones that are redundant
-     (mapconcat
-      (lambda (prop)
-        (let ((key (car prop))
-              (val (cdr prop)))
-          ;; Filter out properties that are redundant or internal
-          (unless (member key '("CATEGORY" "BLOCKED" "FILE" "ITEM" "TODO"))
-            (format ":%s: %s" key val))))
-      properties
-      "\n")
-     "\n:END:\n"
-     ;; Logbook drawer if present
-     (when (and logbook (not (string-empty-p logbook)))
-       (concat ":LOGBOOK:\n" logbook "\n:END:\n"))
-     ;; Body content if present
-     (when (and body (not (string-empty-p body)))
-       (concat body "\n")))))
+     ;; Everything else from the original task unchanged
+     content)))
 
 (defun org-roam-dailies-tasklog--append-to-daily (formatted-entry)
   "Append FORMATTED-ENTRY to today's org-roam daily note.
@@ -204,7 +167,7 @@ Returns t on success, nil on failure."
 
         ;; Main logic
         (org-roam-dailies-tasklog--debug "Logging event: %s" event-type)
-        (let ((task-info (org-roam-dailies-tasklog--extract-task-info)))
+        (let ((task-info (org-roam-dailies-tasklog--get-subtree-content)))
           (when task-info
             (let ((formatted-entry
                    (org-roam-dailies-tasklog--format-log-entry
