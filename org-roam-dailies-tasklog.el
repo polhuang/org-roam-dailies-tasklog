@@ -104,62 +104,19 @@ Creates the directory and file if they don't exist."
       (org-roam-dailies-tasklog--debug "Created daily note: %s" file-path))
     file-path))
 
-(defun org-roam-dailies-tasklog--get-entry-body ()
-  "Get the body text of the current org entry.
-Returns the content below the heading, excluding property drawers and logbook."
+(defun org-roam-dailies-tasklog--get-subtree-content ()
+  "Get the entire content of current subtree (everything after heading).
+Returns heading text, TODO state, and subtree content as an alist."
   (save-excursion
     (org-back-to-heading t)
-    (let ((start (progn
-                   (forward-line 1)
-                   ;; Skip property drawer if present
-                   (when (looking-at org-property-drawer-re)
-                     (re-search-forward "^[ \t]*:END:[ \t]*$" nil t)
-                     (forward-line 1))
-                   ;; Skip logbook drawer if present
-                   (when (looking-at "^[ \t]*:LOGBOOK:[ \t]*$")
-                     (re-search-forward "^[ \t]*:END:[ \t]*$" nil t)
-                     (forward-line 1))
-                   (point)))
-          (end (progn
-                 (outline-next-heading)
-                 (point))))
-      (string-trim (buffer-substring-no-properties start end)))))
-
-(defun org-roam-dailies-tasklog--get-logbook-content ()
-  "Get the LOGBOOK drawer content for the current entry.
-Returns nil if no LOGBOOK drawer exists."
-  (save-excursion
-    (org-back-to-heading t)
-    (let ((limit (save-excursion (outline-next-heading) (point))))
-      (when (re-search-forward "^[ \t]*:LOGBOOK:[ \t]*$" limit t)
-        (let ((start (point))
-              (end (progn
-                     (re-search-forward "^[ \t]*:END:[ \t]*$" limit t)
-                     (match-beginning 0))))
-          (string-trim (buffer-substring-no-properties start end)))))))
-
-(defun org-roam-dailies-tasklog--extract-task-info ()
-  "Extract all relevant information from the current task.
-Returns an alist with task information including heading, state, tags,
-properties, body content, and logbook."
-  (save-excursion
-    (org-back-to-heading t)
-    (let ((heading (org-get-heading t t t t))
-          (todo-state (org-get-todo-state))
-          (tags (org-get-tags))
-          (properties (org-entry-properties nil 'all))
-          (body (when org-roam-dailies-tasklog-include-body
-                  (org-roam-dailies-tasklog--get-entry-body)))
-          (logbook (when org-roam-dailies-tasklog-include-logbook
-                     (org-roam-dailies-tasklog--get-logbook-content)))
-          (file-path (buffer-file-name)))
+    (let* ((heading (org-get-heading t t t t))  ; no tags, todo, priority, comment
+           (todo-state (org-get-todo-state))
+           (content-start (progn (forward-line 1) (point)))
+           (content-end (progn (org-end-of-subtree t) (point)))
+           (content (buffer-substring-no-properties content-start content-end)))
       (list (cons 'heading heading)
             (cons 'todo-state todo-state)
-            (cons 'tags tags)
-            (cons 'properties properties)
-            (cons 'body body)
-            (cons 'logbook logbook)
-            (cons 'file-path file-path)))))
+            (cons 'content content)))))
 
 (defun org-roam-dailies-tasklog--format-log-entry (task-info event-type duration)
   "Format TASK-INFO as a log entry for EVENT-TYPE with optional DURATION.
