@@ -153,6 +153,24 @@ Returns (START-TIME . END-TIME) or nil if no clock data."
                           (t hour))))
       (format "%d:%s %s" display-hour minute am-pm))))
 
+(defun org-roam-dailies-tasklog--find-entry-by-heading (heading daily-file)
+  "Find existing entry with HEADING in DAILY-FILE.
+Returns (START . END) positions if found, nil otherwise."
+  (when (file-exists-p daily-file)
+    (with-current-buffer (find-file-noselect daily-file)
+      (save-excursion
+        (goto-char (point-min))
+        (let ((search-heading (regexp-quote heading)))
+          (when (re-search-forward
+                 (concat "^\\* [A-Z]+ " search-heading)
+                 nil t)
+            (let ((start (line-beginning-position))
+                  (end (save-excursion
+                         (if (outline-next-heading)
+                             (point)
+                           (point-max)))))
+              (cons start end))))))))
+
 (defun org-roam-dailies-tasklog--format-log-entry (task-info event-type duration)
   "Format TASK-INFO as a log entry for EVENT-TYPE with optional DURATION.
 TASK-INFO is an alist containing task information.
@@ -175,10 +193,10 @@ DURATION is an optional string describing time spent (e.g., \"0:30\")."
                             (org-roam-dailies-tasklog--format-time (car clock-range))))
                (end-time (when clock-range
                           (org-roam-dailies-tasklog--format-time (cdr clock-range)))))
-           (format "* %s %s%s%s→%s [%s]\n"
+           (format "* %s %s%s%s → %s [%s]\n"
                    state
                    heading
-                   (make-string (max 1 (- 40 (length heading))) ?\s)
+                   (make-string (max 1 (- 33 (length heading))) ?\s)
                    (or start-time "??:??")
                    (or end-time "??:??")
                    (or clock-sum "0:00")))
