@@ -34,7 +34,7 @@
   :group 'org-roam
   :prefix "org-roam-dailies-tasklog-")
 
-(defcustom org-roam-dailies-tasklog-log-clock-in nil
+(defcustom org-roam-dailies-tasklog-log-clock-in t
   "Whether to log clock-in events.
 Disabled by default since clock-out shows cumulative time."
   :type 'boolean
@@ -128,19 +128,32 @@ Returns formatted time string like \"0:35\" or nil if no clock data."
 
 (defun org-roam-dailies-tasklog--get-clock-range (content)
   "Extract earliest start time and latest end time from CONTENT's LOGBOOK.
-Returns (START-TIME . END-TIME) or nil if no clock data."
+Returns (START-TIME . END-TIME) or nil if no clock data.
+Handles incomplete clock entries (clock-in without clock-out)."
   (when (string-match ":LOGBOOK:" content)
-    (let (start-times end-times)
+    (let (start-times end-times incomplete-start)
       (with-temp-buffer
         (insert content)
         (goto-char (point-min))
+        ;; Match complete clock entries (with end time)
         (while (re-search-forward "CLOCK: \\[\\([^]]+\\)\\]--\\[\\([^]]+\\)\\]" nil t)
           (push (match-string 1) start-times)
-          (push (match-string 2) end-times)))
-      (when (and start-times end-times)
-        ;; Sort and take earliest start and latest end
-        (cons (car (sort start-times #'string<))
-              (car (sort end-times #'string>)))))))
+          (push (match-string 2) end-times))
+        ;; Match incomplete clock entries (clock-in without clock-out)
+        (goto-char (point-min))
+        (when (re-search-forward "CLOCK: \\[\\([^]]+\\)\\]$" nil t)
+          (setq incomplete-start (match-string 1))))
+      (when (or start-times incomplete-start)
+        ;; If there's an incomplete clock, use current time as end
+        (let ((earliest-start (if incomplete-start
+                                  (if start-times
+                                      (car (sort (cons incomplete-start start-times) #'string<))
+                                    incomplete-start)
+                                (car (sort start-times #'string<))))
+              (latest-end (if incomplete-start
+                              (format-time-string "%Y-%m-%d %a %H:%M")
+                            (car (sort end-times #'string>)))))
+          (cons earliest-start latest-end))))))
 
 (defun org-roam-dailies-tasklog--format-time (timestamp-str)
   "Extract time and format as H:MM AM/PM from org timestamp string."
