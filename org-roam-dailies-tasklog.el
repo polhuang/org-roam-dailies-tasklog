@@ -34,22 +34,6 @@
   :group 'org-roam
   :prefix "org-roam-dailies-tasklog-")
 
-(defcustom org-roam-dailies-tasklog-log-clock-in t
-  "Whether to log clock-in events.
-Disabled by default since clock-out shows cumulative time."
-  :type 'boolean
-  :group 'org-roam-dailies-tasklog)
-
-(defcustom org-roam-dailies-tasklog-log-clock-out t
-  "Whether to log clock-out events."
-  :type 'boolean
-  :group 'org-roam-dailies-tasklog)
-
-(defcustom org-roam-dailies-tasklog-log-done t
-  "Whether to log task completion events."
-  :type 'boolean
-  :group 'org-roam-dailies-tasklog)
-
 (defcustom org-roam-dailies-tasklog-completion-states '("DONE")
   "List of TODO states considered as completion states."
   :type '(repeat string)
@@ -276,27 +260,24 @@ Returns t on success, nil on failure."
 
 (defun org-roam-dailies-tasklog--handle-clock-in ()
   "Handle clock-in events by logging to daily note."
-  (when org-roam-dailies-tasklog-log-clock-in
-    (org-roam-dailies-tasklog--log-event "CLOCKED IN" nil)))
+  (org-roam-dailies-tasklog--log-event "CLOCKED IN" nil))
 
 (defun org-roam-dailies-tasklog--handle-clock-out ()
   "Handle clock-out events by logging to daily note with duration."
-  (when org-roam-dailies-tasklog-log-clock-out
-    (let ((duration (when org-clock-out-time
-                      ;; Calculate duration from the clock line
-                      (save-excursion
-                        (when (org-at-clock-log-p)
-                          (let ((start (point)))
-                            (when (looking-at org-clock-line-re)
-                              ;; Extract the duration from the clock line
-                              (let ((effort-string (match-string 1)))
-                                effort-string))))))))
-      (org-roam-dailies-tasklog--log-event "CLOCKED OUT" duration))))
+  (let ((duration (when org-clock-out-time
+                    ;; Calculate duration from the clock line
+                    (save-excursion
+                      (when (org-at-clock-log-p)
+                        (let ((start (point)))
+                          (when (looking-at org-clock-line-re)
+                            ;; Extract the duration from the clock line
+                            (let ((effort-string (match-string 1)))
+                              effort-string))))))))
+    (org-roam-dailies-tasklog--log-event "CLOCKED OUT" duration)))
 
 (defun org-roam-dailies-tasklog--handle-todo-state-change ()
   "Handle TODO state changes by logging completion states to daily note."
-  (when (and org-roam-dailies-tasklog-log-done
-             (member org-state org-roam-dailies-tasklog-completion-states))
+  (when (member org-state org-roam-dailies-tasklog-completion-states)
     (org-roam-dailies-tasklog--log-event org-state nil)))
 
 ;;; Minor mode
