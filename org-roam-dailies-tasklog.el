@@ -1,7 +1,7 @@
 ;;;; org-roam-dailies-tasklog.el --- Automatically log task events to org-roam dailies -*- lexical-binding: t; -*-
 
 ;; Author: Paul Huang
-;; Version: 0.0.1
+;; Version: 0.1.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: org-mode, org-roam, productivity, logging
 ;; URL: https://github.com/polhuang/org-roam-dailies-tasklog.el
@@ -151,6 +151,19 @@ Handles incomplete clock entries (clock-in without clock-out)."
                           (t hour))))
       (format "%d:%s %s" display-hour minute am-pm))))
 
+(defun org-roam-dailies-tasklog--get-scheduled-range (content)
+  "Extract scheduled time range from CONTENT if present.
+Returns (START-TIME . END-TIME) or nil if no scheduled time range."
+  (when (string-match "SCHEDULED: <\\([^>]+\\)>" content)
+    (let ((timestamp (match-string 1 content)))
+      ;; Match time range format: YYYY-MM-DD Day HH:MM-HH:MM
+      (when (string-match "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\} [A-Za-z]+\\) \\([0-9]\\{2\\}:[0-9]\\{2\\}\\)-\\([0-9]\\{2\\}:[0-9]\\{2\\}\\)" timestamp)
+        (let ((date-part (match-string 1 timestamp))
+              (start-time (match-string 2 timestamp))
+              (end-time (match-string 3 timestamp)))
+          (cons (concat date-part " " start-time)
+                (concat date-part " " end-time)))))))
+
 (defun org-roam-dailies-tasklog--find-entry-by-heading (heading daily-file)
   "Find existing entry with HEADING in DAILY-FILE.
 Returns (START . END) positions if found, nil otherwise."
@@ -169,6 +182,18 @@ Returns (START . END) positions if found, nil otherwise."
                            (point-max)))))
               (cons start end))))))))
 
+(defun org-roam-dailies-tasklog--calculate-scheduled-duration (start-str end-str)
+  "Calculate duration between START-STR and END-STR timestamps.
+Returns formatted duration string like \"1:30\"."
+  (when (and start-str end-str)
+    (let* ((start-time (org-parse-time-string start-str))
+           (end-time (org-parse-time-string end-str))
+           (start-minutes (+ (* (nth 2 start-time) 60) (nth 1 start-time)))
+           (end-minutes (+ (* (nth 2 end-time) 60) (nth 1 end-time)))
+           (duration-minutes (- end-minutes start-minutes)))
+      (when (> duration-minutes 0)
+        (format "%d:%02d" (/ duration-minutes 60) (% duration-minutes 60))))))
+
 (defun org-roam-dailies-tasklog--format-log-entry (task-info event-type duration)
   "Format TASK-INFO as a log entry for EVENT-TYPE with optional DURATION.
 TASK-INFO is an alist containing task information.
@@ -179,10 +204,18 @@ DURATION is an optional string describing time spent (e.g., \"0:30\")."
          (content (alist-get 'content task-info))
          (clock-sum (org-roam-dailies-tasklog--calculate-clock-sum content))
          (clock-range (org-roam-dailies-tasklog--get-clock-range content))
-         (start-time (when clock-range
-                       (org-roam-dailies-tasklog--format-time (car clock-range))))
-         (end-time (when clock-range
-                     (org-roam-dailies-tasklog--format-time (cdr clock-range)))))
+         ;; Fall back to scheduled time range if no clock data
+         (scheduled-range (unless clock-range
+                           (org-roam-dailies-tasklog--get-scheduled-range content)))
+         (time-range (or clock-range scheduled-range))
+         (start-time (when time-range
+                       (org-roam-dailies-tasklog--format-time (car time-range))))
+         (end-time (when time-range
+                     (org-roam-dailies-tasklog--format-time (cdr time-range))))
+         ;; Calculate duration from scheduled time if no clock data
+         (calculated-duration (when (and scheduled-range (not clock-sum))
+                               (org-roam-dailies-tasklog--calculate-scheduled-duration
+                                (car scheduled-range) (cdr scheduled-range)))))
     (concat
      ;; Heading format: * STATE HEADING         START → END [DURATION]
      (format "* %s %s%s%s → %s [%s]\n"
@@ -191,7 +224,7 @@ DURATION is an optional string describing time spent (e.g., \"0:30\")."
              (make-string (max 1 (- 33 (length heading))) ?\s)
              (or start-time "??:??")
              (or end-time "??:??")
-             (or clock-sum "0:00"))
+             (or clock-sum calculated-duration "0:00"))
      ;; Everything else from the original task unchanged
      content)))
 
