@@ -287,5 +287,33 @@ Returns t on success, nil on failure."
              (member org-state org-roam-dailies-tasklog-completion-states))
     (org-roam-dailies-tasklog--log-event org-state nil)))
 
+;;; Minor mode
+
+;;;###autoload
+(define-minor-mode org-roam-dailies-tasklog-mode
+  "Automatically log task events to org-roam daily notes.
+
+When enabled, this mode logs the following events to your org-roam daily note:
+  - Clock-in events (when you start working on a task)
+  - Clock-out events (when you stop working on a task, with duration)
+  - Task completion events (when you mark a task as DONE)
+
+Each event captures the task heading, timestamp, tags, properties, and body
+content, and appends it to the end of today's org-roam daily note."
+  :global t
+  :group 'org-roam-dailies-tasklog
+  :lighter " TaskLog"
+  (if org-roam-dailies-tasklog-mode
+      (progn
+        (add-hook 'org-clock-in-hook #'org-roam-dailies-tasklog--handle-clock-in)
+        (add-hook 'org-clock-out-hook #'org-roam-dailies-tasklog--handle-clock-out)
+        (add-hook 'org-after-todo-state-change-hook #'org-roam-dailies-tasklog--handle-todo-state-change)
+        (message "org-roam-dailies-tasklog-mode enabled"))
+    (progn
+      (remove-hook 'org-clock-in-hook #'org-roam-dailies-tasklog--handle-clock-in)
+      (remove-hook 'org-clock-out-hook #'org-roam-dailies-tasklog--handle-clock-out)
+      (remove-hook 'org-after-todo-state-change-hook #'org-roam-dailies-tasklog--handle-todo-state-change)
+      (message "org-roam-dailies-tasklog-mode disabled"))))
+
 (provide 'org-roam-dailies-tasklog)
 ;;; org-roam-dailies-tasklog.el ends here
