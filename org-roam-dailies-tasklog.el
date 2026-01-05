@@ -230,5 +230,62 @@ Manages buffer state to avoid disrupting the user's window layout."
       (unless buffer-was-open
         (kill-buffer)))))
 
+(defun org-roam-dailies-tasklog--log-event (event-type duration)
+  "Log an event of EVENT-TYPE with optional DURATION to the daily note.
+EVENT-TYPE is a string like \"CLOCKED IN\", \"CLOCKED OUT\", or \"DONE\".
+DURATION is an optional string describing time spent (e.g., \"0:30\").
+Returns t on success, nil on failure."
+  (condition-case err
+      (progn
+        ;; Validation
+        (unless (featurep 'org-roam)
+          (error "org-roam is not available"))
+        (unless (derived-mode-p 'org-mode)
+          (error "Not in an org-mode buffer"))
+        (unless (org-at-heading-p)
+          (org-back-to-heading t))
+
+        ;; Main logic
+        (org-roam-dailies-tasklog--debug "Logging event: %s" event-type)
+        (let ((task-info (org-roam-dailies-tasklog--extract-task-info)))
+          (when task-info
+            (let ((formatted-entry
+                   (org-roam-dailies-tasklog--format-log-entry
+                    task-info event-type duration)))
+              (org-roam-dailies-tasklog--append-to-daily formatted-entry)
+              t)))
+        t)
+    (error
+     (message "org-roam-dailies-tasklog: Failed to log event: %s"
+              (error-message-string err))
+     nil)))
+
+;;; Hook handlers
+
+(defun org-roam-dailies-tasklog--handle-clock-in ()
+  "Handle clock-in events by logging to daily note."
+  (when org-roam-dailies-tasklog-log-clock-in
+    (org-roam-dailies-tasklog--log-event "CLOCKED IN" nil)))
+
+(defun org-roam-dailies-tasklog--handle-clock-out ()
+  "Handle clock-out events by logging to daily note with duration."
+  (when org-roam-dailies-tasklog-log-clock-out
+    (let ((duration (when org-clock-out-time
+                      ;; Calculate duration from the clock line
+                      (save-excursion
+                        (when (org-at-clock-log-p)
+                          (let ((start (point)))
+                            (when (looking-at org-clock-line-re)
+                              ;; Extract the duration from the clock line
+                              (let ((effort-string (match-string 1)))
+                                effort-string))))))))
+      (org-roam-dailies-tasklog--log-event "CLOCKED OUT" duration))))
+
+(defun org-roam-dailies-tasklog--handle-todo-state-change ()
+  "Handle TODO state changes by logging completion states to daily note."
+  (when (and org-roam-dailies-tasklog-log-done
+             (member org-state org-roam-dailies-tasklog-completion-states))
+    (org-roam-dailies-tasklog--log-event org-state nil)))
+
 (provide 'org-roam-dailies-tasklog)
 ;;; org-roam-dailies-tasklog.el ends here
