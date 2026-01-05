@@ -102,8 +102,10 @@ Returns heading text, TODO state, and subtree content as an alist."
     (let* ((heading (org-get-heading t t t t))  ; no tags, todo, priority, comment
            (todo-state (org-get-todo-state))
            (content-start (progn (forward-line 1) (point)))
-           (content-end (progn (org-end-of-subtree t) (point)))
-           (content (buffer-substring-no-properties content-start content-end)))
+           (content-end (save-excursion
+                          (outline-next-heading)
+                          (point)))
+           (content (string-trim (buffer-substring-no-properties content-start content-end))))
       (list (cons 'heading heading)
             (cons 'todo-state todo-state)
             (cons 'content content)))))
@@ -116,13 +118,21 @@ DURATION is an optional string describing time spent (e.g., \"0:30\")."
   (let* ((time-str (format-time-string org-roam-dailies-tasklog-time-format))
          (heading (alist-get 'heading task-info))
          (state (or event-type (alist-get 'todo-state task-info)))
-         (content (alist-get 'content task-info)))
+         (content (alist-get 'content task-info))
+         ;; Map event type to display label
+         (event-label (cond
+                       ((string= state "CLOCKED IN") "Clocked In")
+                       ((string= state "CLOCKED OUT") "Clocked Out")
+                       ((string= state "DONE") "Closed")
+                       (t state))))
     (concat
-     ;; New heading with timestamp, event type, and task title
-     (format "* %s: %s %s%s\n"
-             time-str
+     ;; New heading: * STATE HEADING           EVENT-LABEL [TIME]
+     (format "* %s %s%s%s [%s]%s\n"
              state
              heading
+             (make-string (max 1 (- 40 (length heading))) ?\s)  ; padding
+             event-label
+             time-str
              (if duration (format " (%s)" duration) ""))
      ;; Everything else from the original task unchanged
      content)))
