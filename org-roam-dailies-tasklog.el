@@ -95,23 +95,35 @@ Returns heading text, TODO state, and subtree content as an alist."
             (cons 'todo-state todo-state)
             (cons 'content content)))))
 
+(defun org-roam-dailies-tasklog--is-timestamp-today-p (timestamp-str)
+  "Check if TIMESTAMP-STR is from today.
+TIMESTAMP-STR should be in org-mode format (YYYY-MM-DD Day HH:MM)."
+  (when (and timestamp-str (stringp timestamp-str))
+    (let ((today (format-time-string "%Y-%m-%d")))
+      (string-prefix-p today timestamp-str))))
+
 (defun org-roam-dailies-tasklog--calculate-clock-sum (content)
-  "Calculate total clocked time from CONTENT's LOGBOOK.
+  "Calculate total clocked time from CONTENT's LOGBOOK for today only.
 Returns formatted time string like \"0:35\" or nil if no clock data."
   (when (string-match ":LOGBOOK:" content)
-    (let ((total-minutes 0))
+    (let ((total-minutes 0)
+          (today (format-time-string "%Y-%m-%d")))
       (with-temp-buffer
         (insert content)
         (goto-char (point-min))
-        (while (re-search-forward "=>[ \t]+\\([0-9]+\\):\\([0-9]+\\)" nil t)
-          (let ((hours (string-to-number (match-string 1)))
-                (minutes (string-to-number (match-string 2))))
-            (setq total-minutes (+ total-minutes (* hours 60) minutes)))))
+        ;; Match complete clock entries with timestamps
+        (while (re-search-forward "CLOCK: \\[\\([^]]+\\)\\]--\\[\\([^]]+\\)\\] =>[ \t]+\\([0-9]+\\):\\([0-9]+\\)" nil t)
+          (let ((start-timestamp (match-string 1))
+                (hours (string-to-number (match-string 3)))
+                (minutes (string-to-number (match-string 4))))
+            ;; Only include if start timestamp is from today
+            (when (org-roam-dailies-tasklog--is-timestamp-today-p start-timestamp)
+              (setq total-minutes (+ total-minutes (* hours 60) minutes))))))
       (when (> total-minutes 0)
         (format "%d:%02d" (/ total-minutes 60) (% total-minutes 60))))))
 
 (defun org-roam-dailies-tasklog--get-clock-range (content)
-  "Extract earliest start time and latest end time from CONTENT's LOGBOOK.
+  "Extract earliest start time and latest end time from CONTENT's LOGBOOK for today only.
 Returns (START-TIME . END-TIME) or nil if no clock data.
 Handles incomplete clock entries (clock-in without clock-out)."
   (when (string-match ":LOGBOOK:" content)
@@ -121,12 +133,19 @@ Handles incomplete clock entries (clock-in without clock-out)."
         (goto-char (point-min))
         ;; Match complete clock entries (with end time)
         (while (re-search-forward "CLOCK: \\[\\([^]]+\\)\\]--\\[\\([^]]+\\)\\]" nil t)
-          (push (match-string 1) start-times)
-          (push (match-string 2) end-times))
+          (let ((start-ts (match-string 1))
+                (end-ts (match-string 2)))
+            ;; Only include if start timestamp is from today
+            (when (org-roam-dailies-tasklog--is-timestamp-today-p start-ts)
+              (push start-ts start-times)
+              (push end-ts end-times))))
         ;; Match incomplete clock entries (clock-in without clock-out)
         (goto-char (point-min))
         (when (re-search-forward "CLOCK: \\[\\([^]]+\\)\\]$" nil t)
-          (setq incomplete-start (match-string 1))))
+          (let ((start-ts (match-string 1)))
+            ;; Only include if it's from today
+            (when (org-roam-dailies-tasklog--is-timestamp-today-p start-ts)
+              (setq incomplete-start start-ts)))))
       (when (or start-times incomplete-start)
         ;; If there's an incomplete clock, use current time as end
         (let ((earliest-start (if incomplete-start
@@ -140,29 +159,72 @@ Handles incomplete clock entries (clock-in without clock-out)."
           (cons earliest-start latest-end))))))
 
 (defun org-roam-dailies-tasklog--format-time (timestamp-str)
-  "Extract time and format as H:MM AM/PM from org timestamp string."
-  (when (string-match "\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\) [A-Za-z]+ \\([0-9]\\{2\\}\\):\\([0-9]\\{2\\}\\)" timestamp-str)
-    (let* ((hour (string-to-number (match-string 4 timestamp-str)))
-           (minute (match-string 5 timestamp-str))
-           (am-pm (if (< hour 12) "AM" "PM"))
-           (display-hour (cond
-                          ((= hour 0) 12)
-                          ((> hour 12) (- hour 12))
-                          (t hour))))
-      (format "%d:%s %s" display-hour minute am-pm))))
+  "Extract time and format as HH:MM AM/PM from org timestamp string.
+Supports both org-mode format (YYYY-MM-DD Day HH:MM) and ISO 8601 (YYYY-MM-DDTHH:MM).
+Returns nil for invalid or unparseable timestamps."
+  (when (and timestamp-str (stringp timestamp-str))
+    (let ((hour nil)
+          (minute nil))
+      ;; Try org-mode format: YYYY-MM-DD Day HH:MM
+      (when (string-match "\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\) [A-Za-z]+ \\([0-9]\\{2\\}\\):\\([0-9]\\{2\\}\\)" timestamp-str)
+        (setq hour (string-to-number (match-string 4 timestamp-str)))
+        (setq minute (match-string 5 timestamp-str)))
+      ;; Try ISO 8601 format: YYYY-MM-DDTHH:MM or YYYY-MM-DD HH:MM
+      (when (and (not hour)
+                 (string-match "\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\)[T ]\\([0-9]\\{2\\}\\):\\([0-9]\\{2\\}\\)" timestamp-str))
+        (setq hour (string-to-number (match-string 4 timestamp-str)))
+        (setq minute (match-string 5 timestamp-str)))
+      ;; Validate and format if we successfully extracted time
+      (when (and hour minute (>= hour 0) (<= hour 23)
+                 (>= (string-to-number minute) 0)
+                 (<= (string-to-number minute) 59))
+        (let* ((am-pm (if (< hour 12) "AM" "PM"))
+               (display-hour (cond
+                              ((= hour 0) 12)
+                              ((> hour 12) (- hour 12))
+                              (t hour))))
+          (format "%02d:%s %s" display-hour minute am-pm))))))
 
 (defun org-roam-dailies-tasklog--get-scheduled-range (content)
   "Extract scheduled time range from CONTENT if present.
-Returns (START-TIME . END-TIME) or nil if no scheduled time range."
-  (when (string-match "SCHEDULED: <\\([^>]+\\)>" content)
+Returns (START-TIME . END-TIME) or nil if no scheduled time range.
+Handles midnight boundary cases where end time is before start time."
+  (when (and content (stringp content)
+             (string-match "SCHEDULED: <\\([^>]+\\)>" content))
     (let ((timestamp (match-string 1 content)))
       ;; Match time range format: YYYY-MM-DD Day HH:MM-HH:MM
-      (when (string-match "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\} [A-Za-z]+\\) \\([0-9]\\{2\\}:[0-9]\\{2\\}\\)-\\([0-9]\\{2\\}:[0-9]\\{2\\}\\)" timestamp)
-        (let ((date-part (match-string 1 timestamp))
-              (start-time (match-string 2 timestamp))
-              (end-time (match-string 3 timestamp)))
-          (cons (concat date-part " " start-time)
-                (concat date-part " " end-time)))))))
+      (when (string-match "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\) \\([A-Za-z]+\\) \\([0-9]\\{2\\}:[0-9]\\{2\\}\\)-\\([0-9]\\{2\\}:[0-9]\\{2\\}\\)" timestamp)
+        (let* ((date-part (match-string 1 timestamp))
+               (day-part (match-string 2 timestamp))
+               (start-time (match-string 3 timestamp))
+               (end-time (match-string 4 timestamp))
+               (start-str (concat date-part " " day-part " " start-time))
+               (end-str (concat date-part " " day-part " " end-time)))
+          ;; Check for midnight boundary case
+          (when (org-roam-dailies-tasklog--crosses-midnight-p start-time end-time)
+            (org-roam-dailies-tasklog--debug
+             "Detected midnight boundary: %s-%s" start-time end-time)
+            ;; Add one day to end time
+            (let* ((parsed-date (org-parse-time-string start-str))
+                   (next-day (time-add (apply #'encode-time parsed-date)
+                                       (* 24 60 60))))
+              (setq end-str (format-time-string
+                             (format "%%Y-%%m-%%d %%a %s" end-time)
+                             next-day))))
+          (cons start-str end-str))))))
+
+(defun org-roam-dailies-tasklog--crosses-midnight-p (start-time end-time)
+  "Check if time range from START-TIME to END-TIME crosses midnight.
+START-TIME and END-TIME should be strings in HH:MM format."
+  (when (and start-time end-time
+             (string-match "\\([0-9]\\{2\\}\\):\\([0-9]\\{2\\}\\)" start-time))
+    (let ((start-hour (string-to-number (match-string 1 start-time)))
+          (start-min (string-to-number (match-string 2 start-time))))
+      (when (string-match "\\([0-9]\\{2\\}\\):\\([0-9]\\{2\\}\\)" end-time)
+        (let ((end-hour (string-to-number (match-string 1 end-time)))
+              (end-min (string-to-number (match-string 2 end-time))))
+          (or (< end-hour start-hour)
+              (and (= end-hour start-hour) (< end-min start-min))))))))
 
 (defun org-roam-dailies-tasklog--find-entry-by-heading (heading daily-file)
   "Find existing entry with HEADING in DAILY-FILE.
@@ -182,23 +244,58 @@ Returns (START . END) positions if found, nil otherwise."
                            (point-max)))))
               (cons start end))))))))
 
+(defun org-roam-dailies-tasklog--get-existing-content (heading daily-file)
+  "Get the content (everything after heading line) for HEADING in DAILY-FILE.
+Returns the content string if entry found, nil otherwise."
+  (when (file-exists-p daily-file)
+    (with-current-buffer (find-file-noselect daily-file)
+      (save-excursion
+        (goto-char (point-min))
+        (let ((search-heading (regexp-quote heading)))
+          (when (re-search-forward
+                 (concat "^\\* .+? " search-heading "\\b")
+                 nil t)
+            (let ((content-start (progn (forward-line 1) (point)))
+                  (content-end (save-excursion
+                                 (if (outline-next-heading)
+                                     (point)
+                                   (point-max)))))
+              (string-trim (buffer-substring-no-properties content-start content-end)))))))))
+
 (defun org-roam-dailies-tasklog--calculate-scheduled-duration (start-str end-str)
   "Calculate duration between START-STR and END-STR timestamps.
-Returns formatted duration string like \"1:30\"."
-  (when (and start-str end-str)
-    (let* ((start-time (org-parse-time-string start-str))
-           (end-time (org-parse-time-string end-str))
-           (start-minutes (+ (* (nth 2 start-time) 60) (nth 1 start-time)))
-           (end-minutes (+ (* (nth 2 end-time) 60) (nth 1 end-time)))
-           (duration-minutes (- end-minutes start-minutes)))
-      (when (> duration-minutes 0)
-        (format "%d:%02d" (/ duration-minutes 60) (% duration-minutes 60))))))
+Returns formatted duration string like \"1:30\".
+Handles midnight boundary cases where end is on the next day.
+Returns nil for invalid inputs or negative durations."
+  (when (and start-str end-str
+             (stringp start-str) (stringp end-str))
+    (condition-case err
+        (let* ((start-time (org-parse-time-string start-str))
+               (end-time (org-parse-time-string end-str)))
+          ;; Validate that we got valid parse results
+          (when (and start-time end-time
+                     (nth 1 start-time) (nth 2 start-time)  ; minute and hour exist
+                     (nth 1 end-time) (nth 2 end-time))
+            (let* ((start-seconds (apply #'encode-time start-time))
+                   (end-seconds (apply #'encode-time end-time))
+                   (duration-seconds (time-subtract end-seconds start-seconds))
+                   (duration-minutes (/ (time-to-seconds duration-seconds) 60)))
+              (when (> duration-minutes 0)
+                (let ((hours (floor (/ duration-minutes 60)))
+                      (minutes (floor (mod duration-minutes 60))))
+                  (format "%d:%02d" hours minutes))))))
+      (error
+       (org-roam-dailies-tasklog--debug
+        "Failed to calculate duration: %s -> %s (error: %s)"
+        start-str end-str (error-message-string err))
+       nil))))
 
-(defun org-roam-dailies-tasklog--format-log-entry (task-info event-type duration)
+(defun org-roam-dailies-tasklog--format-log-entry (task-info event-type duration &optional preserve-content)
   "Format TASK-INFO as a log entry for EVENT-TYPE with optional DURATION.
 TASK-INFO is an alist containing task information.
 EVENT-TYPE is a string describing the event (e.g., \"CLOCKED IN\", \"DONE\").
-DURATION is an optional string describing time spent (e.g., \"0:30\")."
+DURATION is an optional string describing time spent (e.g., \"0:30\").
+PRESERVE-CONTENT is optional content from existing daily entry to preserve."
   (let* ((heading (alist-get 'heading task-info))
          (state (or (alist-get 'todo-state task-info) "IN PROGRESS"))
          (content (alist-get 'content task-info))
@@ -216,17 +313,23 @@ DURATION is an optional string describing time spent (e.g., \"0:30\")."
          (calculated-duration (when (and scheduled-range (not clock-sum))
                                (org-roam-dailies-tasklog--calculate-scheduled-duration
                                 (car scheduled-range) (cdr scheduled-range)))))
-    (concat
-     ;; Heading format: * STATE HEADING         START → END [DURATION]
-     (format "* %s %s%s%s → %s [%s]\n"
-             state
-             heading
-             (make-string (max 1 (- 33 (length heading))) ?\s)
-             (or start-time "??:??")
-             (or end-time "??:??")
-             (or clock-sum calculated-duration "0:00"))
-     ;; Everything else from the original task unchanged
-     content)))
+    (let* ((time-str (format "%s → %s [%s]"
+                             (or start-time "??:??")
+                             (or end-time "??:??")
+                             (or clock-sum calculated-duration "00:00")))
+           ;; Calculate padding for right alignment at column 88, minimum 5 spaces
+           (prefix-len (+ 2 (length state) 1 (length heading)))  ; "* STATE HEADING"
+           (target-col 88)
+           (padding (max 5 (- target-col prefix-len (length time-str)))))
+      (concat
+       ;; Heading format: * STATE HEADING         START → END [DURATION]
+       (format "* %s %s%s%s\n"
+               state
+               heading
+               (make-string padding ?\s)
+               time-str)
+       ;; Use preserved content if provided, otherwise use source task content
+       (or preserve-content content)))))
 
 (defun org-roam-dailies-tasklog--upsert-to-daily (formatted-entry heading)
   "Update existing entry for HEADING or append FORMATTED-ENTRY if not found.
@@ -276,16 +379,34 @@ Returns t on success, nil on failure."
         ;; Main logic
         (org-roam-dailies-tasklog--debug "Logging event: %s" event-type)
         (let* ((task-info (org-roam-dailies-tasklog--get-subtree-content))
-               (heading (alist-get 'heading task-info)))
-          (when task-info
-            (let ((formatted-entry
-                   (org-roam-dailies-tasklog--format-log-entry
-                    task-info event-type duration)))
-              (org-roam-dailies-tasklog--upsert-to-daily formatted-entry heading)
-              t)))
-        t)
+               (heading (alist-get 'heading task-info))
+               (daily-file (org-roam-dailies-tasklog--get-daily-note-path))
+               ;; Get existing content from daily note if entry already exists
+               (existing-content (org-roam-dailies-tasklog--get-existing-content heading daily-file)))
+          (unless task-info
+            (error "Failed to extract task information from current heading"))
+          (unless heading
+            (error "Failed to extract heading text"))
+
+          (org-roam-dailies-tasklog--debug "Task heading: %s" heading)
+          (org-roam-dailies-tasklog--debug "Task state: %s" (alist-get 'todo-state task-info))
+          (when existing-content
+            (org-roam-dailies-tasklog--debug "Preserving existing content from daily note"))
+
+          (let ((formatted-entry
+                 (org-roam-dailies-tasklog--format-log-entry
+                  task-info event-type duration existing-content)))
+            (unless formatted-entry
+              (error "Failed to format log entry"))
+
+            (org-roam-dailies-tasklog--debug "Formatted entry length: %d chars"
+                                             (length formatted-entry))
+            (org-roam-dailies-tasklog--upsert-to-daily formatted-entry heading)
+            (org-roam-dailies-tasklog--debug "Successfully logged event")
+            t)))
     (error
-     (message "org-roam-dailies-tasklog: Failed to log event: %s"
+     (message "org-roam-dailies-tasklog: Failed to log event '%s': %s"
+              event-type
               (error-message-string err))
      nil)))
 
