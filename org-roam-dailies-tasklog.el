@@ -290,6 +290,68 @@ Returns nil for invalid inputs or negative durations."
         start-str end-str (error-message-string err))
        nil))))
 
+(defun org-roam-dailies-tasklog--filter-logbook-today (content)
+  "Filter CONTENT to only include LOGBOOK entries from today.
+Returns the content with only today's CLOCK entries in the LOGBOOK.
+If content has no LOGBOOK, returns content unchanged."
+  (if (and content (string-match ":LOGBOOK:" content))
+    (let ((today (format-time-string "%Y-%m-%d"))
+          (filtered-lines '()))
+      (with-temp-buffer
+        (insert content)
+        (goto-char (point-min))
+        ;; Find the LOGBOOK section
+        (when (re-search-forward ":LOGBOOK:" nil t)
+          (let ((logbook-start (match-beginning 0))
+                (logbook-end (when (re-search-forward ":END:" nil t)
+                              (match-end 0))))
+            (when logbook-end
+              ;; Extract lines between LOGBOOK and END
+              (goto-char logbook-start)
+              (forward-line 1)
+              (while (< (point) (- logbook-end 5))  ; -5 to skip :END:
+                (let ((line (buffer-substring-no-properties
+                            (line-beginning-position)
+                            (line-end-position))))
+                  ;; Keep line if it's a CLOCK entry from today or not a CLOCK entry
+                  (when (or (not (string-prefix-p "CLOCK:" (string-trim line)))
+                           (and (string-match "CLOCK: \\[\\([^]]+\\)\\]" line)
+                                (org-roam-dailies-tasklog--is-timestamp-today-p
+                                 (match-string 1 line))))
+                    (push line filtered-lines)))
+                (forward-line 1))
+              ;; Reconstruct the content with filtered LOGBOOK
+              (let ((before-logbook (buffer-substring-no-properties (point-min) logbook-start))
+                    (after-logbook (buffer-substring-no-properties logbook-end (point-max))))
+                (concat before-logbook
+                       ":LOGBOOK:\n"
+                       (if filtered-lines
+                           (concat (mapconcat 'identity (nreverse filtered-lines) "\n") "\n")
+                         "")
+                       ":END:"
+                       after-logbook)))))))
+    ;; If no LOGBOOK found, return content unchanged
+    content))
+
+(defun org-roam-dailies-tasklog--extract-text-content (content)
+  "Extract text content from CONTENT, excluding PROPERTIES and LOGBOOK sections.
+Returns the text that appears after these sections."
+  (when content
+    (with-temp-buffer
+      (insert content)
+      (goto-char (point-min))
+      ;; Skip past PROPERTIES section if present
+      (when (re-search-forward "^:PROPERTIES:" nil t)
+        (when (re-search-forward "^:END:" nil t)
+          (forward-line 1)))
+      ;; Skip past LOGBOOK section if present
+      (when (re-search-forward "^:LOGBOOK:" nil t)
+        (when (re-search-forward "^:END:" nil t)
+          (forward-line 1)))
+      ;; Get remaining text
+      (let ((text (string-trim (buffer-substring-no-properties (point) (point-max)))))
+        (if (string-empty-p text) nil text)))))
+
 (defun org-roam-dailies-tasklog--format-log-entry (task-info event-type duration &optional preserve-content)
   "Format TASK-INFO as a log entry for EVENT-TYPE with optional DURATION.
 TASK-INFO is an alist containing task information.
@@ -299,6 +361,8 @@ PRESERVE-CONTENT is optional content from existing daily entry to preserve."
   (let* ((heading (alist-get 'heading task-info))
          (state (or (alist-get 'todo-state task-info) "IN PROGRESS"))
          (content (alist-get 'content task-info))
+         ;; Filter content to only include today's LOGBOOK entries
+         (filtered-content (org-roam-dailies-tasklog--filter-logbook-today content))
          (clock-sum (org-roam-dailies-tasklog--calculate-clock-sum content))
          (clock-range (org-roam-dailies-tasklog--get-clock-range content))
          ;; Fall back to scheduled time range if no clock data
@@ -312,7 +376,14 @@ PRESERVE-CONTENT is optional content from existing daily entry to preserve."
          ;; Calculate duration from scheduled time if no clock data
          (calculated-duration (when (and scheduled-range (not clock-sum))
                                (org-roam-dailies-tasklog--calculate-scheduled-duration
-                                (car scheduled-range) (cdr scheduled-range)))))
+                                (car scheduled-range) (cdr scheduled-range))))
+         ;; Extract text content from preserved content if it exists
+         (preserved-text (when preserve-content
+                          (org-roam-dailies-tasklog--extract-text-content preserve-content)))
+         ;; Combine filtered content with preserved text
+         (final-content (if preserved-text
+                           (concat filtered-content "\n" preserved-text)
+                         filtered-content)))
     (let* ((time-str (format "%s → %s [%s]"
                              (or start-time "??:??")
                              (or end-time "??:??")
@@ -328,8 +399,8 @@ PRESERVE-CONTENT is optional content from existing daily entry to preserve."
                heading
                (make-string padding ?\s)
                time-str)
-       ;; Use preserved content if provided, otherwise use source task content
-       (or preserve-content content)))))
+       ;; Use final content with filtered LOGBOOK and preserved text
+       final-content))))
 
 (defun org-roam-dailies-tasklog--upsert-to-daily (formatted-entry heading)
   "Update existing entry for HEADING or append FORMATTED-ENTRY if not found.
