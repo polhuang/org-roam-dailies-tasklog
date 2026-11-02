@@ -1,8 +1,8 @@
 ;;;; org-roam-dailies-tasklog.el --- Automatically log task events to org-roam dailies -*- lexical-binding: t; -*-
 
 ;; Author: Paul Huang
-;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1"))
+;; Version: 0.2.0
+;; Package-Requires: ((emacs "27.1") (org-roam "2.0.0"))
 ;; Keywords: org-mode, org-roam, productivity, logging
 ;; URL: https://github.com/polhuang/org-roam-dailies-tasklog.el
 
@@ -25,7 +25,11 @@
 
 (require 'org)
 (require 'org-clock)
+(require 'org-id)
+(require 'subr-x)
+(require 'cl-lib)
 (require 'org-roam)
+(require 'org-roam-dailies)
 
 ;;; Customization
 
@@ -43,6 +47,23 @@
   "Enable debug messages."
   :type 'boolean
   :group 'org-roam-dailies-tasklog)
+
+(defcustom org-roam-dailies-tasklog-time-format "%I:%M %p"
+  "Time display format, as accepted by `format-time-string'.
+Use %H:%M for 24-hour time.  Refresh displays after changing this option."
+  :type 'string :group 'org-roam-dailies-tasklog)
+
+(defcustom org-roam-dailies-tasklog-compact-duration nil
+  "When non-nil, display durations as 1h 30m instead of 1:30."
+  :type 'boolean :group 'org-roam-dailies-tasklog)
+
+(defcustom org-roam-dailies-tasklog-time-column nil
+  "Column at which timing starts, or nil for five spaces after the title.
+Long titles always get at least five spaces."
+  :type '(choice (const nil) integer) :group 'org-roam-dailies-tasklog)
+
+(defvar org-roam-dailies-tasklog--updating nil
+  "Non-nil while tasklog is updating a generated entry.")
 
 ;;; Internal functions
 
@@ -69,12 +90,12 @@ Creates the directory and file if they don't exist."
     (unless (file-exists-p file-path)
       (with-temp-file file-path
         (insert (format "#+title: %s\n\n"
-                       (format-time-string "%Y-%m-%d" time))))
+			(format-time-string "%Y-%m-%d" time))))
       (org-roam-dailies-tasklog--debug "Created daily note: %s" file-path))
     file-path))
 
 (defun org-roam-dailies-tasklog--get-subtree-content ()
-  "Get the entire content of current subtree (everything after heading).
+  "Get the current heading and its body, excluding child headings.
 Returns heading text, TODO state, and subtree content as an alist."
   (save-excursion
     (org-back-to-heading t)
@@ -126,251 +147,260 @@ START-TS and END-TS are timestamp strings, DURATION is formatted like \"1:30\"."
             "0:00"))
      (t nil))))
 
-(defun org-roam-dailies-tasklog--format-time (timestamp-str)
-  "Extract time and format as HH:MM AM/PM from org timestamp string.
-Supports org-mode format (YYYY-MM-DD Day HH:MM).
-Returns nil for invalid timestamps."
-  (when (and timestamp-str (stringp timestamp-str))
-    (let ((hour nil)
-          (minute nil))
-      ;; Try org-mode format: YYYY-MM-DD Day HH:MM
-      (when (string-match "\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\) [A-Za-z]+ \\([0-9]\\{2\\}\\):\\([0-9]\\{2\\}\\)" timestamp-str)
-        (setq hour (string-to-number (match-string 4 timestamp-str)))
-        (setq minute (match-string 5 timestamp-str)))
-      ;; Validate and format
-      (when (and hour minute (>= hour 0) (<= hour 23))
-        (let* ((am-pm (if (< hour 12) "AM" "PM"))
-               (display-hour (cond
-                              ((= hour 0) 12)
-                              ((> hour 12) (- hour 12))
-                              (t hour))))
-          (format "%02d:%s %s" display-hour minute am-pm))))))
+(defun org-roam-dailies-tasklog--format-time (timestamp)
+  "Format Org TIMESTAMP using the configured time format."
+  (when timestamp
+    (condition-case nil
+        (format-time-string org-roam-dailies-tasklog-time-format
+                            (org-time-string-to-time timestamp))
+      (error nil))))
 
-(defun org-roam-dailies-tasklog--find-last-entry-by-heading (heading daily-file)
-  "Find the LAST (most recent) entry with HEADING in DAILY-FILE.
-Returns (START . END) positions if found, nil otherwise."
-  (when (file-exists-p daily-file)
-    (with-current-buffer (find-file-noselect daily-file)
-      (save-excursion
-        (goto-char (point-min))
-        (let ((search-heading (regexp-quote heading))
-              last-match-start last-match-end)
-          ;; Find all matches and keep the last one
-          (while (re-search-forward
-                  (concat "^\\* .+? " search-heading "\\b")
-                  nil t)
-            (setq last-match-start (line-beginning-position))
-            (setq last-match-end (save-excursion
-                                   (if (outline-next-heading)
-                                       (point)
-                                     (point-max)))))
-          ;; Return the last match found
-          (when last-match-start
-            (cons last-match-start last-match-end)))))))
+(defun org-roam-dailies-tasklog--duration-label (duration)
+  "Format DURATION according to the display preference."
+  (if (and org-roam-dailies-tasklog-compact-duration
+           (string-match "\\`\\([0-9]+\\):\\([0-9]+\\)\\'" duration))
+      (let ((hours (string-to-number (match-string 1 duration)))
+            (minutes (string-to-number (match-string 2 duration))))
+        (string-join (delq nil (list (when (> hours 0) (format "%dh" hours))
+                                     (when (or (> minutes 0) (= hours 0))
+                                       (format "%dm" minutes)))) " "))
+    duration))
 
-(defun org-roam-dailies-tasklog--get-existing-content (heading daily-file)
-  "Get the content for the LAST entry with HEADING in DAILY-FILE.
-Returns the content string if entry found, nil otherwise."
-  (when (file-exists-p daily-file)
-    (with-current-buffer (find-file-noselect daily-file)
-      (save-excursion
-        (goto-char (point-min))
-        (let ((search-heading (regexp-quote heading))
-              last-content)
-          ;; Find all matches and keep the last one
-          (while (re-search-forward
-                  (concat "^\\* .+? " search-heading "\\b")
-                  nil t)
-            (let ((content-start (progn (forward-line 1) (point)))
-                  (content-end (save-excursion
-                                 (if (outline-next-heading)
-                                     (point)
-                                   (point-max)))))
-              (setq last-content (string-trim (buffer-substring-no-properties content-start content-end)))))
-          last-content)))))
+;;; Timing display
 
-(defun org-roam-dailies-tasklog--extract-text-content (content)
-  "Extract text content from CONTENT, excluding PROPERTIES and LOGBOOK sections.
-Returns the text that appears after these sections."
-  (when content
-    (with-temp-buffer
-      (insert content)
-      (goto-char (point-min))
-      ;; Skip past PROPERTIES section if present
-      (when (re-search-forward "^:PROPERTIES:" nil t)
-        (when (re-search-forward "^:END:" nil t)
-          (forward-line 1)))
-      ;; Skip past LOGBOOK section if present
-      (when (re-search-forward "^:LOGBOOK:" nil t)
-        (when (re-search-forward "^:END:" nil t)
-          (forward-line 1)))
-      ;; Get remaining text
-      (let ((text (string-trim (buffer-substring-no-properties (point) (point-max)))))
-        (if (string-empty-p text) nil text)))))
+(defvar-local org-roam-dailies-tasklog--time-overlays nil
+  "Timing overlays owned by tasklog in this buffer.")
 
-(defun org-roam-dailies-tasklog--format-log-entry (task-info event-type duration &optional preserve-content)
-  "Format TASK-INFO as a log entry for EVENT-TYPE with optional DURATION.
-TASK-INFO is an alist containing task information.
-EVENT-TYPE is a string describing the event (e.g., \"CLOCKED IN\", \"DONE\").
-DURATION is an optional string describing time spent (e.g., \"0:30\").
-PRESERVE-CONTENT is optional content from existing daily entry to preserve."
-  (let* ((heading (alist-get 'heading task-info))
-         (state (or (alist-get 'todo-state task-info) "IN PROGRESS"))
-         (content (alist-get 'content task-info))
-         ;; Extract only the latest clock entry
-         (latest-clock-line (org-roam-dailies-tasklog--get-latest-clock-entry content))
-         ;; Parse the clock times
-         (clock-data (org-roam-dailies-tasklog--parse-clock-times latest-clock-line))
-         (start-ts (nth 0 clock-data))
-         (end-ts (nth 1 clock-data))
-         (duration-str (nth 2 clock-data))
-         ;; Format times for display
-         (start-time (org-roam-dailies-tasklog--format-time start-ts))
-         (end-time (org-roam-dailies-tasklog--format-time end-ts))
-         ;; Extract text content from existing daily note entry (we want to preserve it)
-         (preserved-text (when preserve-content
-                          (org-roam-dailies-tasklog--extract-text-content preserve-content)))
-         ;; Build the LOGBOOK section with only the latest entry
-         (logbook-section (if latest-clock-line
-                              (concat ":LOGBOOK:\n" latest-clock-line "\n:END:")
-                            "")))
-    (let* ((time-str (format "%s → %s [%s]"
-                             (or start-time "??:??")
-                             (or end-time "??:??")
-                             (or duration-str "0:00")))
-           ;; Calculate padding for right alignment at column 88, minimum 5 spaces
-           (prefix-len (+ 2 (length state) 1 (length heading)))  ; "* STATE HEADING"
-           (target-col 88)
-           (padding (max 5 (- target-col prefix-len (length time-str)))))
-      (let ((entry (concat
-                     ;; Heading format: * STATE HEADING         START → END [DURATION]
-                     (format "* %s %s%s%s\n"
-                             state
-                             heading
-                             (make-string padding ?\s)
-                             time-str)
-                     ;; Add LOGBOOK section
-                     (when logbook-section
-                       (concat logbook-section "\n"))
-                     ;; Add preserved text from daily note
-                     (when preserved-text
-                       (concat preserved-text "\n")))))
-        ;; Ensure entry ends with a newline
-        (if (string-suffix-p "\n" entry)
-            entry
-          (concat entry "\n"))))))
+(defun org-roam-dailies-tasklog--clear-time-overlays ()
+  "Remove this buffer's tasklog timing overlays."
+  (mapc #'delete-overlay org-roam-dailies-tasklog--time-overlays)
+  (setq org-roam-dailies-tasklog--time-overlays nil))
 
-(defun org-roam-dailies-tasklog--upsert-to-daily (formatted-entry heading &optional append-only)
-  "Update existing entry for HEADING or append FORMATTED-ENTRY if not found.
-Opens the daily note file, searches for existing entry with HEADING,
-and either replaces it or appends a new entry.
-If APPEND-ONLY is non-nil, always append a new entry without searching."
-  (let* ((daily-file (org-roam-dailies-tasklog--get-daily-note-path))
-         (buffer-was-open (find-buffer-visiting daily-file))
-         (entry-pos (unless append-only
-                      (org-roam-dailies-tasklog--find-last-entry-by-heading heading daily-file))))
-    (with-current-buffer (find-file-noselect daily-file)
-      (save-excursion
-        (if (and entry-pos (not append-only))
-            ;; Replace existing entry
-            (progn
-              (org-roam-dailies-tasklog--debug "Updating existing entry for: %s" heading)
-              (goto-char (car entry-pos))
-              (delete-region (car entry-pos) (cdr entry-pos))
-              (insert formatted-entry)
-              ;; Ensure proper spacing after the entry
-              (unless (or (eobp) (looking-at "^\\s-*$"))
-                (insert "\n")))
-          ;; Append new entry
-          (org-roam-dailies-tasklog--debug "Creating new entry for: %s" heading)
-          (goto-char (point-max))
-          (unless (bolp)
-            (insert "\n"))
-          (when (> (point-max) 1)
-            (insert "\n"))
-          (insert formatted-entry)))
-      (save-buffer)
-      ;; Close buffer if it wasn't already open
-      (unless buffer-was-open
-        (kill-buffer)))))
+(defun org-roam-dailies-tasklog--daily-buffer-p ()
+  "Return non-nil if this buffer visits a dated org-roam daily note."
+  (and (derived-mode-p 'org-mode)
+       buffer-file-name
+       (boundp 'org-roam-directory)
+       (string-match-p "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\.org\\'"
+                       (file-name-nondirectory buffer-file-name))
+       (equal (file-name-as-directory
+               (expand-file-name (file-name-directory buffer-file-name)))
+              (file-name-as-directory
+               (expand-file-name
+                (or (and (boundp 'org-roam-dailies-directory)
+                         org-roam-dailies-directory)
+                    "daily")
+                org-roam-directory)))))
 
-(defun org-roam-dailies-tasklog--log-event (event-type duration &optional append-only)
-  "Log an event of EVENT-TYPE with optional DURATION to the daily note.
-EVENT-TYPE is a string like \"CLOCKED IN\", \"CLOCKED OUT\", or \"DONE\".
-DURATION is an optional string describing time spent (e.g., \"0:30\").
-If APPEND-ONLY is non-nil, always create a new entry instead of updating existing.
-Returns t on success, nil on failure."
-  (condition-case err
-      (progn
-        ;; Validation
-        (unless (featurep 'org-roam)
-          (error "org-roam is not available"))
-        (unless (derived-mode-p 'org-mode)
-          (error "Not in an org-mode buffer"))
-        (unless (org-at-heading-p)
-          (org-back-to-heading t))
+(defun org-roam-dailies-tasklog--refresh-time-overlays (&optional beg end _old-length)
+  "Refresh timing displays in the changed region BEG to END, or everywhere."
+  (unless (and beg (org-roam-dailies-tasklog--daily-buffer-p))
+    (org-roam-dailies-tasklog--clear-time-overlays))
+  (when (and org-roam-dailies-tasklog-mode
+             (org-roam-dailies-tasklog--daily-buffer-p))
+    (save-excursion
+      (save-restriction
+        (widen)
+        (save-match-data
+          (let* ((from (if beg
+                           (progn (goto-char beg)
+                                  (if (re-search-backward "^\\* " nil t)
+                                      (line-beginning-position) (point-min)))
+                         (point-min)))
+                 (to (if end
+                         (progn (goto-char end) (forward-line 1)
+                                (if (re-search-forward "^\\* " nil t)
+                                    (line-beginning-position) (point-max)))
+                       (point-max))))
+            (setq org-roam-dailies-tasklog--time-overlays
+                  (cl-delete-if
+                   (lambda (overlay)
+                     (when (or (not (overlay-buffer overlay))
+                               (and (>= (overlay-start overlay) from)
+                                    (<= (overlay-start overlay) to)))
+                       (delete-overlay overlay) t))
+                   org-roam-dailies-tasklog--time-overlays))
+            (goto-char from)
+            (while (re-search-forward "^\\* " to t)
+              (let* ((end (line-end-position))
+                     ;; Old notes already have literal timing in their headings.
+                     (legacy (string-match-p
+                              " → .* \\[[0-9]+:[0-9]+\\]$"
+                              (buffer-substring-no-properties (point) end)))
+                     (info (org-roam-dailies-tasklog--get-subtree-content))
+                     (clock-line (org-roam-dailies-tasklog--get-latest-clock-entry
+                                  (alist-get 'content info)))
+                     (times (org-roam-dailies-tasklog--parse-clock-times clock-line))
+                     (start (org-roam-dailies-tasklog--format-time (nth 0 times)))
+                     (finish (org-roam-dailies-tasklog--format-time (nth 1 times))))
+		(when (and (not legacy) start finish)
+                  (let* ((running (not (string-match-p "--" clock-line)))
+			 (padding (make-string
+                                   (if org-roam-dailies-tasklog-time-column
+                                       (max 5 (- org-roam-dailies-tasklog-time-column
+						 (save-excursion (goto-char end)
+								 (current-column))))
+                                     5) ?\s))
+			 (label (concat padding
+					(if running
+                                            (format "%s → running" start)
+                                          (format "%s → %s [%s]" start finish
+                                                  (org-roam-dailies-tasklog--duration-label
+                                                   (nth 2 times))))))
+			 (overlay (make-overlay end end)))
+                    (overlay-put overlay 'after-string
+				 (propertize label 'face 'shadow))
+                    (push overlay org-roam-dailies-tasklog--time-overlays)))))))))))
 
-        ;; Main logic
-        (org-roam-dailies-tasklog--debug "Logging event: %s (append-only: %s)" event-type append-only)
-        (let* ((task-info (org-roam-dailies-tasklog--get-subtree-content))
-               (heading (alist-get 'heading task-info))
-               (daily-file (org-roam-dailies-tasklog--get-daily-note-path))
-               ;; Get existing content from daily note if entry already exists (only if not append-only)
-               (existing-content (unless append-only
-                                  (org-roam-dailies-tasklog--get-existing-content heading daily-file))))
-          (unless task-info
-            (error "Failed to extract task information from current heading"))
-          (unless heading
-            (error "Failed to extract heading text"))
+(defun org-roam-dailies-tasklog--setup-time-overlays ()
+  "Enable timing display in a daily-note buffer when tasklog is active."
+  (when (and org-roam-dailies-tasklog-mode
+             (org-roam-dailies-tasklog--daily-buffer-p))
+    (add-hook 'after-change-functions
+              #'org-roam-dailies-tasklog--refresh-time-overlays nil t)
+    (add-hook 'change-major-mode-hook
+              #'org-roam-dailies-tasklog--clear-time-overlays nil t)
+    (org-roam-dailies-tasklog--refresh-time-overlays)))
 
-          (org-roam-dailies-tasklog--debug "Task heading: %s" heading)
-          (org-roam-dailies-tasklog--debug "Task state: %s" (alist-get 'todo-state task-info))
-          (when existing-content
-            (org-roam-dailies-tasklog--debug "Preserving existing content from daily note"))
+;;; Session storage
 
-          (let ((formatted-entry
-                 (org-roam-dailies-tasklog--format-log-entry
-                  task-info event-type duration existing-content)))
-            (unless formatted-entry
-              (error "Failed to format log entry"))
+(defun org-roam-dailies-tasklog--find-session (source-id session-id)
+  "Find SOURCE-ID and SESSION-ID in the current daily buffer."
+  (goto-char (point-min))
+  (catch 'found
+    (while (re-search-forward "^\\* " nil t)
+      (when (and (equal source-id (org-entry-get nil "TASKLOG_SOURCE_ID"))
+                 (equal session-id (org-entry-get nil "TASKLOG_SESSION")))
+        (beginning-of-line)
+        (throw 'found (point))))))
 
-            (org-roam-dailies-tasklog--debug "Formatted entry length: %d chars"
-                                             (length formatted-entry))
-            (org-roam-dailies-tasklog--upsert-to-daily formatted-entry heading append-only)
-            (org-roam-dailies-tasklog--debug "Successfully logged event")
-            t)))
-    (error
-     (message "org-roam-dailies-tasklog: Failed to log event '%s': %s"
-              event-type
-              (error-message-string err))
-     nil)))
+(defun org-roam-dailies-tasklog--update-clock (clock-line)
+  "Replace only the managed clock line with CLOCK-LINE at this heading.
+Leave notes, properties, other clock lines, and child headings untouched."
+  (when clock-line
+    (save-excursion
+      (org-back-to-heading t)
+      (let ((limit (save-excursion (outline-next-heading) (point)))
+            (old (org-entry-get nil "TASKLOG_CLOCK")))
+        (if (and old (re-search-forward (concat "^" (regexp-quote old) "$") limit t))
+            (replace-match clock-line t t)
+          (org-back-to-heading t)
+          (if (re-search-forward "^:LOGBOOK:[ \t]*$" limit t)
+              (progn (forward-line 1) (insert clock-line "\n"))
+            (org-back-to-heading t)
+            (org-end-of-meta-data t)
+            (unless (bolp) (insert "\n"))
+            (insert ":LOGBOOK:\n" clock-line "\n:END:\n")))
+        (org-back-to-heading t)
+        (org-entry-put nil "TASKLOG_CLOCK" clock-line)))))
 
-;;; Hook handlers
+(defun org-roam-dailies-tasklog--write-session (file source-id session-id heading state clock-line)
+  "Update a session in FILE using SOURCE-ID and SESSION-ID.
+HEADING and STATE come from the source.  CLOCK-LINE is nil for status updates."
+  (let* ((existing (find-buffer-visiting file))
+         (buffer (find-file-noselect file))
+         (org-roam-dailies-tasklog--updating t))
+    (unwind-protect
+        (with-current-buffer buffer
+          (save-excursion
+            (save-restriction
+              (widen)
+              (atomic-change-group
+                (unless (org-roam-dailies-tasklog--find-session source-id session-id)
+                  (goto-char (point-max))
+                  (unless (bolp) (insert "\n"))
+                  (insert "\n* " heading "\n")
+                  (forward-line -1)
+                  (org-entry-put nil "TASKLOG_SOURCE_ID" source-id)
+                  (org-entry-put nil "TASKLOG_SESSION" session-id)
+                  (org-entry-put nil "TASKLOG_STATE" "")
+                  (org-end-of-meta-data t)
+                  (insert "Source: [[id:" source-id "][Original task]]\n")
+                  (org-back-to-heading t))
+                ;; Match the previously stored state even if this daily file has
+                ;; different TODO keywords.  Never replace the entry's body.
+                (let ((old (or (org-get-todo-state)
+                               (org-entry-get nil "TASKLOG_STATE"))))
+                  (beginning-of-line)
+                  (when (looking-at "\\*+ ") (goto-char (match-end 0)))
+                  (when (and old (not (string-empty-p old))
+                             (looking-at (concat (regexp-quote old) " ")))
+                    (delete-region (point) (match-end 0)))
+                  (when (and state (not (string-empty-p state)))
+                    (insert state " "))
+                  (org-entry-put nil "TASKLOG_STATE" (or state "")))
+                (org-roam-dailies-tasklog--update-clock clock-line)))
+            (save-buffer)))
+      (when (and (not existing) (buffer-live-p buffer)
+                 (not (buffer-modified-p buffer)))
+        (kill-buffer buffer)))))
+
+(defun org-roam-dailies-tasklog--log-event (event &optional new-session)
+  "Log EVENT at the current source heading, starting NEW-SESSION if requested."
+  (unless org-roam-dailies-tasklog--updating
+    (condition-case err
+        (save-excursion
+          (org-back-to-heading t)
+          ;; Generated entries are snapshots, never sources for further logging.
+          (unless (org-entry-get nil "TASKLOG_SOURCE_ID")
+            (let* ((info (org-roam-dailies-tasklog--get-subtree-content))
+                   (source-id (org-id-get-create))
+                   (session (unless new-session (org-entry-get nil "TASKLOG_SESSION")))
+                   (file (unless new-session (org-entry-get nil "TASKLOG_FILE")))
+                   (clock (when (memq event '(clock-in clock-out))
+                            (org-roam-dailies-tasklog--get-latest-clock-entry
+                             (alist-get 'content info)))))
+              (unless (and session file)
+                (setq session (org-id-new)
+                      file (org-roam-dailies-tasklog--get-daily-note-path)))
+              (org-roam-dailies-tasklog--write-session
+               file source-id session (alist-get 'heading info)
+               (alist-get 'todo-state info) clock)
+              ;; Persist routing on the source, so midnight and Emacs restarts
+              ;; do not change which daily entry receives subsequent updates.
+              (org-entry-put nil "TASKLOG_SESSION" session)
+              (org-entry-put nil "TASKLOG_FILE" file)
+              t)))
+      (error (message "org-roam-dailies-tasklog: %s failed: %s"
+                      event (error-message-string err))
+             nil))))
+
+;;; Hook handlers and commands
 
 (defun org-roam-dailies-tasklog--handle-clock-in ()
-  "Handle clock-in events by logging to daily note.
-Always creates a new entry for each clock-in (new work session)."
-  (org-roam-dailies-tasklog--log-event "CLOCKED IN" nil t))
+  "Create a new daily session for a source clock-in."
+  (org-roam-dailies-tasklog--log-event 'clock-in t))
 
 (defun org-roam-dailies-tasklog--handle-clock-out ()
-  "Handle clock-out events by logging to daily note with duration.
-Updates the most recent entry for this task."
-  (let ((duration (when org-clock-out-time
-                    ;; Calculate duration from the clock line
-                    (save-excursion
-                      (when (org-at-clock-log-p)
-                        (let ((start (point)))
-                          (when (looking-at org-clock-line-re)
-                            ;; Extract the duration from the clock line
-                            (let ((effort-string (match-string 1)))
-                              effort-string))))))))
-    (org-roam-dailies-tasklog--log-event "CLOCKED OUT" duration nil)))
+  "Finish the recorded session, including sessions started before midnight."
+  (org-roam-dailies-tasklog--log-event 'clock-out))
 
 (defun org-roam-dailies-tasklog--handle-todo-state-change ()
-  "Handle TODO state changes by logging completion states to daily note.
-Updates the most recent entry for this task."
-  (when (member org-state org-roam-dailies-tasklog-completion-states)
-    (org-roam-dailies-tasklog--log-event org-state nil nil)))
+  "Sync state changes to the latest session, including reopened tasks.
+Untracked tasks create an entry only for configured completion states.
+Earlier sessions remain historical snapshots; daily edits do not sync back."
+  (when (and (not org-roam-dailies-tasklog--updating)
+             (not (org-entry-get nil "TASKLOG_SOURCE_ID"))
+             (or (org-entry-get nil "TASKLOG_SESSION")
+                 (member (org-get-todo-state)
+                         org-roam-dailies-tasklog-completion-states)))
+    (org-roam-dailies-tasklog--log-event 'state)))
+
+;;;###autoload
+(defun org-roam-dailies-tasklog-visit-source ()
+  "Visit the original task associated with the daily entry at point."
+  (interactive)
+  (let ((id (org-entry-get nil "TASKLOG_SOURCE_ID")))
+    (unless id (user-error "This is not a tasklog session entry"))
+    (org-id-goto id)))
+
+;;;###autoload
+(defun org-roam-dailies-tasklog-refresh ()
+  "Refresh timing overlays in all open daily notes after changing options."
+  (interactive)
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (org-roam-dailies-tasklog--refresh-time-overlays))))
 
 ;;; Minor mode
 
@@ -381,19 +411,34 @@ Updates the most recent entry for this task."
 When enabled, this mode logs the following events to your org-roam daily note:
   - Clock-in events (when you start working on a task)
   - Clock-out events (when you stop working on a task, with duration)
-  - Task completion events (when you mark a task as DONE)
+  - State changes for tracked tasks, including reopening completed tasks
+  - Completion of untracked tasks in configured completion states
 
-Each clock-in creates a new entry in the daily note with only that session's data."
+Each clock-in creates a new entry with only that session's data.
+Times appear beside headings as overlays, derived from the LOGBOOK;
+they are not stored in the heading text."
   :global t
   :group 'org-roam-dailies-tasklog
   :lighter " TaskLog"
   (if org-roam-dailies-tasklog-mode
       (progn
+        (add-hook 'org-mode-hook #'org-roam-dailies-tasklog--setup-time-overlays)
+        (dolist (buffer (buffer-list))
+          (with-current-buffer buffer
+            (org-roam-dailies-tasklog--setup-time-overlays)))
         (add-hook 'org-clock-in-hook #'org-roam-dailies-tasklog--handle-clock-in)
         (add-hook 'org-clock-out-hook #'org-roam-dailies-tasklog--handle-clock-out)
         (add-hook 'org-after-todo-state-change-hook #'org-roam-dailies-tasklog--handle-todo-state-change)
         (message "org-roam-dailies-tasklog-mode enabled"))
     (progn
+      (remove-hook 'org-mode-hook #'org-roam-dailies-tasklog--setup-time-overlays)
+      (dolist (buffer (buffer-list))
+        (with-current-buffer buffer
+          (remove-hook 'after-change-functions
+                       #'org-roam-dailies-tasklog--refresh-time-overlays t)
+          (remove-hook 'change-major-mode-hook
+                       #'org-roam-dailies-tasklog--clear-time-overlays t)
+          (org-roam-dailies-tasklog--clear-time-overlays)))
       (remove-hook 'org-clock-in-hook #'org-roam-dailies-tasklog--handle-clock-in)
       (remove-hook 'org-clock-out-hook #'org-roam-dailies-tasklog--handle-clock-out)
       (remove-hook 'org-after-todo-state-change-hook #'org-roam-dailies-tasklog--handle-todo-state-change)
